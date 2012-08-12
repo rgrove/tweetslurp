@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+
+var util = require('util'),
+
+    nomnom = require('nomnom'),
+    _      = require('underscore'),
+
+    TweetSlurp = require('../');
+
+// Parse command-line options.
+opts = nomnom
+    .script('tweetslurp --user <username>')
+    .options({
+        'output': {
+            abbr   : 'o',
+            metavar: '<file>',
+            help   : 'Output file to which tweets should be written.'
+        },
+
+        'user': {
+            abbr    : 'u',
+            metavar : '<user>',
+            required: true,
+            help    : 'Twitter username to back up.'
+        },
+
+        'no-replies': {
+            default: false,
+            flag   : true,
+            help   : 'Exclude replies from the backup.'
+        },
+
+        'no-retweets': {
+            default: false,
+            flag   : true,
+            help   : 'Exclude native retweets from the backup.'
+        },
+
+        'debug': {
+            default: false,
+            flag   : true,
+            help   : 'Enable debugging output.'
+        },
+
+        'version': {
+            flag: true,
+            help: 'Print version number and exit.',
+
+            callback: function () {
+                var pkg = require('../package.json');
+                return pkg.name + ' v' + pkg.version + '\n' + pkg.copyright;
+            }
+        }
+    })
+    .nom();
+
+var params = {},
+    ts     = new TweetSlurp(),
+    lastBackup;
+
+if (opts.debug) {
+    ts.on('request', function (e) {
+        util.log('GET ' + e.uri);
+    });
+}
+
+// Populate Twitter URL parameters based on CLI options.
+if (opts['no-replies']) {
+    params.exclude_replies = 1;
+}
+
+if (opts['no-retweets']) {
+    params.include_rts = 0;
+}
+
+// Try to load an existing backup if there is one.
+if (opts.output) {
+    ts.loadBackup(opts.output, opts.user, function (err, backup) {
+        if (err) {
+            throw err;
+        }
+
+        getTweets(backup);
+    });
+} else {
+    getTweets(ts.getDefaultMetadata());
+}
+
+function getTweets(backup) {
+    var tweets = [];
+
+    lastBackup = {
+        firstId: backup.firstId,
+        lastId : backup.lastId
+    };
+
+    // Maintain a buffer of loaded tweets just in case an error occurs during
+    // catchup. This way we can at least save the tweets we've loaded.
+    ts.on('tweets', function (e) {
+        Array.prototype.unshift.apply(tweets, e.tweets);
+    });
+
+    ts.on('complete', function (e) {
+        Array.prototype.push.apply(backup.tweets, e.tweets);
+        finish(backup);
+    });
+
+    ts.on('error', function (err, e) {
+        Array.prototype.push.apply(backup.tweets, tweets);
+        finish(backup);
+
+        if (e) {
+            if (e.body.error) {
+                console.log('Error: ' + e.body.error);
+                console.log('[' + e.body.request + ']');
+            } else {
+                console.log('Error: HTTP ' + e.status);
+            }
+        } else {
+            throw err;
+        }
+    });
+
+    ts.getTweets(opts.user, params, {
+        firstId: backup.firstId,
+        lastId : backup.lastId
+    });
+}
+
+function finish(backup) {
+    var changed;
+
+    if (backup.tweets.length) {
+        backup.firstId = backup.tweets[0].id_str;
+        backup.lastId  = backup.tweets[backup.tweets.length - 1].id_str;
+    } else {
+        backup.firstId = null;
+        backup.lastId  = null;
+    }
+
+    changed = backup.firstId !== lastBackup.firstId || backup.lastId !== lastBackup.lastId;
+
+    if (changed) {
+        backup.tweets = ts.sortTweets(backup.tweets);
+
+        if (opts.output) {
+            ts.writeBackup(opts.output, backup, function (err) {
+                if (err) {
+                    throw err;
+                }
+            });
+        } else {
+            console.log(JSON.stringify(backup, null, 2));
+        }
+    }
+}
