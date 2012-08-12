@@ -15,7 +15,7 @@ Installing
 ----------
 
 ```bash
-$ npm install tweetslurp
+$ npm i -g tweetslurp
 ```
 
 
